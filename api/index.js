@@ -1,6 +1,12 @@
 import axios from 'axios';
 
 export default async function handler(req, res) {
+  // Handle preflight request
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method not allowed' });
     return;
@@ -18,11 +24,18 @@ export default async function handler(req, res) {
       }
     );
 
+    // Important: Add CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
     res.status(200).json(response.data);
   } catch (error) {
     console.error('Proxy error:', error.response?.data || error.message);
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.status(error.response?.status || 500).json({
-      error: error.response?.data?.error || 'Proxy error',
+      error: 'Proxy error',
     });
   }
 }

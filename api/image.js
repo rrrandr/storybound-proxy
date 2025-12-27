@@ -17,17 +17,25 @@ export default async function handler(req, res) {
   }
 
   // ----- INPUT -----
-  const { prompt, model, size, ...rest } = (req.body || {});
+  // Important: strip size out so it cannot be forwarded to Grok accidentally via ...rest
+  const body = (req.body || {});
+  const { prompt, model, size, ...restRaw } = body;
+
   if (!prompt || typeof prompt !== 'string') {
     res.status(400).json({ error: 'Missing required field: prompt' });
     return;
   }
 
-  // Your front-end passes size sometimes; default if missing:
+  // Remove size if someone included it inside rest (defensive)
+  // eslint-disable-next-line no-unused-vars
+  const { size: _ignoredSize, ...rest } = restRaw;
+
+  // Front-end passes size sometimes; keep for providers that support it (OpenAI)
   const requestedSize = size || '1024x1024';
 
   // ----- PROVIDER CONFIG -----
-  const GROK_API_KEY = process.env.GROK_API_KEY;
+  // Accept either GROK_API_KEY or XAI_API_KEY (your screenshot shows XAI_API_KEY)
+  const GROK_API_KEY = process.env.GROK_API_KEY || process.env.XAI_API_KEY;
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
@@ -42,7 +50,6 @@ export default async function handler(req, res) {
         return await fn(i);
       } catch (e) {
         lastErr = e;
-        // small backoff
         if (i < tries - 1) await new Promise(r => setTimeout(r, delayMs * (i + 1)));
       }
     }
@@ -60,31 +67,30 @@ export default async function handler(req, res) {
 
   // ----- 1) GROK IMAGE -----
   async function tryGrok() {
-    if (!GROK_API_KEY) throw new Error('GROK_API_KEY not set');
+    if (!GROK_API_KEY) throw new Error('GROK_API_KEY (or XAI_API_KEY) not set');
 
-    // NOTE: Replace URL if your Grok image endpoint differs.
-    // This is a placeholder that matches the "send prompt + model" pattern you’ve been using.
+    // xAI images endpoint
     const url = 'https://api.x.ai/v1/images/generations';
 
-    const resp = await axios.post(
-      url,
-      {
-        model: grokModel,
-        prompt,
-        size: requestedSize,
-        ...rest
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${GROK_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 60000
-      }
-    );
+    // IMPORTANT: Grok rejects "size" (your error proves it). So do NOT send size.
+    // Also avoid passing any unknown image params unless you know xAI supports them.
+    const payload = {
+      model: grokModel,
+      prompt,
+      ...rest
+    };
 
-    // Expect either { image: 'data-url' } OR OpenAI-like { data:[{b64_json}] }
+    const resp = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${GROK_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 60000
+    });
+
     const data = resp.data || {};
+
+    // Support a few common return shapes
     if (data.image && typeof data.image === 'string') {
       return { image: data.image, promptUsed: data.promptUsed || prompt, provider: 'grok' };
     }
@@ -94,6 +100,16 @@ export default async function handler(req, res) {
       return { image: `data:image/png;base64,${b64}`, promptUsed: data.promptUsed || prompt, provider: 'grok' };
     }
 
+    const b64alt = data?.data?.[0]?.b64;
+    if (b64alt) {
+      return { image: `data:image/png;base64,${b64alt}`, promptUsed: data.promptUsed || prompt, provider: 'grok' };
+    }
+
+    const urlImg = data?.data?.[0]?.url;
+    if (urlImg) {
+      return { image: urlImg, promptUsed: data.promptUsed || prompt, provider: 'grok' };
+    }
+
     throw new Error('Grok returned no image payload');
   }
 
@@ -101,14 +117,12 @@ export default async function handler(req, res) {
   async function tryOpenAI() {
     if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not set');
 
-    // This is the modern OpenAI Images endpoint pattern.
-    // If you later want me to pin exact models + payload to current docs, tell me which OpenAI model you plan to use.
     const url = 'https://api.openai.com/v1/images/generations';
 
     const resp = await axios.post(
       url,
       {
-        // model: 'gpt-image-1', // example; set later
+        // model: 'gpt-image-1', // set later when you add OPENAI_API_KEY
         prompt,
         size: requestedSize,
         response_format: 'b64_json'
@@ -130,26 +144,20 @@ export default async function handler(req, res) {
   // ----- 3) GEMINI IMAGE (fallback) -----
   async function tryGemini() {
     if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set');
-
-    // Gemini image generation APIs vary by product/version.
-    // This is a placeholder stub wired for later—won’t run until you fill the correct endpoint/payload.
     throw new Error('Gemini image fallback not wired yet (needs endpoint/payload)');
   }
 
   // ----- EXECUTION: retry + fallback chain -----
   try {
-    // Try Grok with retries first
     const grokResult = await withRetry(() => tryGrok(), { tries: 2, delayMs: 700 });
     res.status(200).json(grokResult);
     return;
   } catch (grokErr) {
-    // Grok failed, try OpenAI
     try {
       const openaiResult = await withRetry(() => tryOpenAI(), { tries: 2, delayMs: 700 });
       res.status(200).json(openaiResult);
       return;
     } catch (openaiErr) {
-      // OpenAI failed, try Gemini
       try {
         const geminiResult = await withRetry(() => tryGemini(), { tries: 1, delayMs: 700 });
         res.status(200).json(geminiResult);

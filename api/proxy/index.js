@@ -18,7 +18,7 @@ export default async function handler(req, res) {
 
   // ----- KEYS -----
   const XAI_API_KEY = process.env.XAI_API_KEY || process.env.GROK_API_KEY;
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // AI Studio key
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // Google AI Studio key
 
   // ----- HELPERS -----
   const timeoutMs = 60000;
@@ -38,16 +38,10 @@ export default async function handler(req, res) {
 
   // Convert OpenAI/xAI-style {messages:[{role,content}]} into Gemini {contents, systemInstruction}
   function toGeminiRequest(body) {
-    const {
-      model,
-      messages,
-      temperature,
-      top_p,
-      max_tokens,
-    } = body || {};
+    const { messages, temperature, top_p, max_tokens } = body || {};
 
-    // Let client pass a Gemini model name; otherwise use env/default
-    const geminiModel = model || process.env.GEMINI_MODEL || "gemini-2.0-flash";
+    // HARDCODED: Always use Flash for fallback so Grok model names never leak into Gemini
+    const geminiModel = "gemini-2.0-flash";
 
     const sysTexts = [];
     const contents = [];
@@ -88,7 +82,7 @@ export default async function handler(req, res) {
       };
     }
 
-    // Optional mappings
+    // Optional mappings (safe to omit if you want)
     if (typeof temperature === "number") reqBody.generationConfig.temperature = temperature;
     if (typeof top_p === "number") reqBody.generationConfig.topP = top_p;
     if (typeof max_tokens === "number") reqBody.generationConfig.maxOutputTokens = max_tokens;
@@ -96,7 +90,7 @@ export default async function handler(req, res) {
     return { geminiModel, reqBody };
   }
 
-  // Convert Gemini response into an OpenAI-ish chat.completions shape
+  // Convert Gemini response into an OpenAI/xAI-ish chat.completions shape (NO gemini_raw)
   function fromGeminiToChatCompletions(geminiResp, modelName = "gemini") {
     const data = geminiResp?.data || {};
     const text =
@@ -116,8 +110,6 @@ export default async function handler(req, res) {
           finish_reason: "stop",
         },
       ],
-      // remove this if you don't want to expose it to the browser
-      gemini_raw: data,
     };
   }
 
@@ -148,8 +140,10 @@ export default async function handler(req, res) {
         geminiModel
       )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 
+      // Add Accept header (nice-to-have)
       const geminiResp = await postWithTimeout(geminiUrl, reqBody, {
         "Content-Type": "application/json",
+        Accept: "application/json",
       });
 
       res.status(200).json(fromGeminiToChatCompletions(geminiResp, geminiModel));

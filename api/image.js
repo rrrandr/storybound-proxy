@@ -36,7 +36,7 @@ export default async function handler(req, res) {
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
   const grokModel = model || "grok-2-image-1212";
-  const openaiModel = "gpt-image-1"; // required if you use OpenAI fallback
+  const openaiModel = "gpt-image-1"; // OpenAI images generation model
 
   // ----- HELPERS -----
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -63,20 +63,30 @@ export default async function handler(req, res) {
   }
 
   /**
-   * Normalize to the SAME shape your frontend already handles:
+   * Normalize ALL providers to a shape your frontend can use:
    * {
-   *   provider: 'grok' | 'openai' | 'gemini',
+   *   provider: 'grok'|'openai'|'gemini',
    *   promptUsed: string,
+   *   url: string,               // ALWAYS present on success (either remote URL or data URI)
    *   data: [{ url?: string, b64_json?: string }]
    * }
    */
-  function ok({ provider, promptUsed, url, b64_json }) {
+  function ok({ provider, promptUsed, url, b64_json, mimeType = "image/png" }) {
+    const finalUrl =
+      url ||
+      (b64_json ? `data:${mimeType};base64,${b64_json}` : undefined);
+
+    if (!finalUrl) {
+      throw new Error("ok() called without url or b64_json");
+    }
+
     return {
       provider,
       promptUsed: promptUsed || prompt,
+      url: finalUrl, // <-- KEY FIX: top-level url for frontend
       data: [
         {
-          ...(url ? { url } : {}),
+          url: finalUrl,          // <-- also keep url in data[0] for compatibility
           ...(b64_json ? { b64_json } : {}),
         },
       ],
@@ -110,8 +120,6 @@ export default async function handler(req, res) {
     }
 
     const data = resp.data || {};
-
-    // Common shapes
     const b64 = data?.data?.[0]?.b64_json || data?.data?.[0]?.b64;
     const imgUrl = data?.data?.[0]?.url;
 
@@ -119,7 +127,7 @@ export default async function handler(req, res) {
       return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, url: imgUrl });
     }
     if (b64) {
-      return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, b64_json: b64 });
+      return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, b64_json: b64, mimeType: "image/png" });
     }
 
     // Some older/alt shapes
@@ -128,11 +136,10 @@ export default async function handler(req, res) {
       if (v.startsWith("http")) {
         return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, url: v });
       }
-      // could be data URI
       if (v.startsWith("data:image/")) {
         const split = v.split("base64,");
         if (split.length === 2) {
-          return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, b64_json: split[1] });
+          return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, b64_json: split[1], mimeType: "image/png" });
         }
       }
     }
@@ -171,86 +178,82 @@ export default async function handler(req, res) {
     const b64 = resp?.data?.data?.[0]?.b64_json;
     if (!b64) throw new Error("OpenAI returned no image payload (no b64_json)");
 
-    return ok({ provider: "openai", promptUsed: prompt, b64_json: b64 });
+    // Key: return as data URI url
+    return ok({ provider: "openai", promptUsed: prompt, b64_json: b64, mimeType: "image/png" });
   }
 
-// ----- 3) GEMINI IMAGE (fallback) -----
-async function tryGemini() {
-  if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not set');
+  // ----- 3) GEMINI IMAGE (fallback) -----
+  async function tryGemini() {
+    if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not set");
 
-  // Models per Google docs:
-  // - Fast: gemini-2.5-flash-image
-  // - Higher-end: gemini-3-pro-image-preview
-  // Default to the fast one unless you override via env.
-  const geminiModel =
-    process.env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image';
+    const geminiModel = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    geminiModel
-  )}:generateContent`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+      geminiModel
+    )}:generateContent`;
 
-  // Map your requestedSize (e.g. "1024x1024") to an aspect ratio
-  // Gemini image REST supports imageConfig.aspectRatio (ex: "16:9"). :contentReference[oaicite:2]{index=2}
-  const sizeToAspect = (s) => {
-    const map = {
-      '1024x1024': '1:1',
-      '512x512': '1:1',
-      '1536x1024': '3:2',
-      '1024x1536': '2:3',
-      '1344x768': '16:9',
-      '768x1344': '9:16',
+    const sizeToAspect = (s) => {
+      const map = {
+        "1024x1024": "1:1",
+        "512x512": "1:1",
+        "1536x1024": "3:2",
+        "1024x1536": "2:3",
+        "1344x768": "16:9",
+        "768x1344": "9:16",
+      };
+      return map[s] || "1:1";
     };
-    return map[s] || '1:1';
-  };
 
-  const payload = {
-    contents: [
-      {
-        parts: [{ text: prompt }],
+    const payload = {
+      contents: [
+        {
+          parts: [{ text: prompt }],
+        },
+      ],
+      generationConfig: {
+        // Some Gemini image endpoints behave better if you request Image modality explicitly.
+        // If your model complains, comment this line back out.
+        responseModalities: ["IMAGE"],
+        imageConfig: {
+          aspectRatio: sizeToAspect(requestedSize),
+        },
       },
-    ],
-    generationConfig: {
-      // If you want ONLY an image back, uncomment responseModalities.
-      // responseModalities: ["Image"],
-      imageConfig: {
-        aspectRatio: sizeToAspect(requestedSize),
-      },
-    },
-  };
-
-  const resp = await axios.post(url, payload, {
-    headers: {
-      'x-goog-api-key': GEMINI_API_KEY,
-      'Content-Type': 'application/json',
-    },
-    timeout: 60000,
-  });
-
-  const data = resp.data || {};
-
-  // Gemini returns candidates[0].content.parts, with inlineData for images. :contentReference[oaicite:3]{index=3}
-  const parts = data?.candidates?.[0]?.content?.parts || [];
-  const inline = parts.find((p) => p.inlineData && p.inlineData.data);
-
-  if (inline?.inlineData?.data) {
-    const mime = inline.inlineData.mimeType || 'image/png';
-    return {
-      image: `data:${mime};base64,${inline.inlineData.data}`,
-      promptUsed: prompt,
-      provider: 'gemini',
-      model: geminiModel,
     };
+
+    const resp = await axios.post(url, payload, {
+      headers: {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+      },
+      timeout: 60000,
+      validateStatus: () => true,
+    });
+
+    if (resp.status < 200 || resp.status >= 300) {
+      throw new Error(`Gemini ${resp.status}: ${errMsg({ response: resp })}`);
+    }
+
+    const data = resp.data || {};
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    const inline = parts.find((p) => p.inlineData && p.inlineData.data);
+
+    if (inline?.inlineData?.data) {
+      const mime = inline.inlineData.mimeType || "image/png";
+      return ok({
+        provider: "gemini",
+        promptUsed: prompt,
+        b64_json: inline.inlineData.data,
+        mimeType: mime,
+      });
+    }
+
+    const textPart = parts.find((p) => typeof p.text === "string" && p.text.trim());
+    if (textPart?.text) {
+      throw new Error(`Gemini returned text but no image: ${textPart.text.slice(0, 200)}`);
+    }
+
+    throw new Error("Gemini returned no image payload");
   }
-
-  // Sometimes you may also get text parts alongside/without images
-  const textPart = parts.find((p) => typeof p.text === 'string' && p.text.trim());
-  if (textPart?.text) {
-    throw new Error(`Gemini returned text but no image: ${textPart.text.slice(0, 200)}`);
-  }
-
-  throw new Error('Gemini returned no image payload');
-}
-
 
   // ----- EXECUTION: retry + fallback chain -----
   try {

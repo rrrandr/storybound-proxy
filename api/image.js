@@ -6,37 +6,32 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  if (req.method === "OPTIONS") {
-    res.status(200).end();
-    return;
-  }
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   // ----- INPUT -----
   const body = req.body || {};
-  const { prompt, model, size, ...restRaw } = body;
+  const { prompt, provider, model, size, n, ...restRaw } = body;
 
   if (!prompt || typeof prompt !== "string") {
-    res.status(400).json({ error: "Missing required field: prompt" });
-    return;
+    return res.status(400).json({ error: "Missing required field: prompt" });
   }
 
-  // Defensive: strip "size" even if nested
+  // Strip size from rest no matter what
   // eslint-disable-next-line no-unused-vars
   const { size: _ignoredSize, ...rest } = restRaw;
 
   const requestedSize = size || "1024x1024";
 
-  // ----- PROVIDER CONFIG -----
+  // ----- KEYS -----
   const GROK_API_KEY = process.env.GROK_API_KEY || process.env.XAI_API_KEY;
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-  const grokModel = model || "grok-2-image-1212";
-  const openaiModel = "gpt-image-1"; // OpenAI images generation model
+  // Defaults
+  const grokModelDefault = "grok-2-image-1212";
+  const openaiModelDefault = "gpt-image-1";
+  const geminiModelDefault = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
 
   // ----- HELPERS -----
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -63,37 +58,41 @@ export default async function handler(req, res) {
   }
 
   /**
-   * Normalize ALL providers to a shape your frontend can use:
+   * Normalize ALL providers to:
    * {
    *   provider: 'grok'|'openai'|'gemini',
    *   promptUsed: string,
-   *   url: string,               // ALWAYS present on success (either remote URL or data URI)
+   *   url: string,               // remote URL or data URI
    *   data: [{ url?: string, b64_json?: string }]
    * }
    */
-  function ok({ provider, promptUsed, url, b64_json, mimeType = "image/png" }) {
-    const finalUrl =
-      url ||
-      (b64_json ? `data:${mimeType};base64,${b64_json}` : undefined);
-
-    if (!finalUrl) {
-      throw new Error("ok() called without url or b64_json");
-    }
+  function ok({ providerName, promptUsed, url, b64_json, mimeType = "image/png" }) {
+    const finalUrl = url || (b64_json ? `data:${mimeType};base64,${b64_json}` : undefined);
+    if (!finalUrl) throw new Error("ok() called without url or b64_json");
 
     return {
-      provider,
+      provider: providerName,
       promptUsed: promptUsed || prompt,
-      url: finalUrl, // <-- KEY FIX: top-level url for frontend
-      data: [
-        {
-          url: finalUrl,          // <-- also keep url in data[0] for compatibility
-          ...(b64_json ? { b64_json } : {}),
-        },
-      ],
+      url: finalUrl,
+      data: [{ url: finalUrl, ...(b64_json ? { b64_json } : {}) }],
     };
   }
 
-  // ----- 1) GROK IMAGE -----
+  // Map common size strings to Gemini aspect ratios
+  const sizeToAspect = (s) => {
+    const map = {
+      "1024x1024": "1:1",
+      "512x512": "1:1",
+      "1536x1024": "3:2",
+      "1024x1536": "2:3",
+      "1344x768": "16:9",
+      "768x1344": "9:16",
+    };
+    return map[s] || "1:1";
+  };
+
+  // ----- PROVIDERS -----
+
   async function tryGrok() {
     if (!GROK_API_KEY) throw new Error("GROK_API_KEY (or XAI_API_KEY) not set");
 
@@ -101,9 +100,10 @@ export default async function handler(req, res) {
 
     // IMPORTANT: do NOT send `size` to xAI.
     const payload = {
-      model: grokModel,
+      model: model || grokModelDefault,
       prompt,
-      ...rest,
+      ...(n ? { n } : {}),
+      ...rest, // any other supported knobs
     };
 
     const resp = await axios.post(url, payload, {
@@ -123,33 +123,27 @@ export default async function handler(req, res) {
     const b64 = data?.data?.[0]?.b64_json || data?.data?.[0]?.b64;
     const imgUrl = data?.data?.[0]?.url;
 
-    if (imgUrl) {
-      return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, url: imgUrl });
-    }
-    if (b64) {
-      return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, b64_json: b64, mimeType: "image/png" });
-    }
+    if (imgUrl) return ok({ providerName: "grok", promptUsed: data.promptUsed || prompt, url: imgUrl });
+    if (b64) return ok({ providerName: "grok", promptUsed: data.promptUsed || prompt, b64_json: b64, mimeType: "image/png" });
 
-    // Some older/alt shapes
+    // Some alt shapes
     if (typeof data.image === "string") {
       const v = data.image;
-      if (v.startsWith("http")) {
-        return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, url: v });
-      }
+      if (v.startsWith("http")) return ok({ providerName: "grok", promptUsed: data.promptUsed || prompt, url: v });
       if (v.startsWith("data:image/")) {
         const split = v.split("base64,");
-        if (split.length === 2) {
-          return ok({ provider: "grok", promptUsed: data.promptUsed || prompt, b64_json: split[1], mimeType: "image/png" });
-        }
+        if (split.length === 2) return ok({ providerName: "grok", promptUsed: data.promptUsed || prompt, b64_json: split[1], mimeType: "image/png" });
       }
     }
 
     throw new Error("Grok returned no image payload (no url/b64_json)");
   }
 
-  // ----- 2) OPENAI IMAGE (fallback) -----
   async function tryOpenAI() {
     if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+
+    // Allow override via `model` but default to gpt-image-1
+    const openaiModel = model || openaiModelDefault;
 
     const url = "https://api.openai.com/v1/images/generations";
 
@@ -178,45 +172,24 @@ export default async function handler(req, res) {
     const b64 = resp?.data?.data?.[0]?.b64_json;
     if (!b64) throw new Error("OpenAI returned no image payload (no b64_json)");
 
-    // Key: return as data URI url
-    return ok({ provider: "openai", promptUsed: prompt, b64_json: b64, mimeType: "image/png" });
+    return ok({ providerName: "openai", promptUsed: prompt, b64_json: b64, mimeType: "image/png" });
   }
 
-  // ----- 3) GEMINI IMAGE (fallback) -----
   async function tryGemini() {
     if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not set");
 
-    const geminiModel = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+    // Allow override via `model` but default to env or gemini-2.5-flash-image
+    const geminiModel = model || geminiModelDefault;
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
       geminiModel
     )}:generateContent`;
 
-    const sizeToAspect = (s) => {
-      const map = {
-        "1024x1024": "1:1",
-        "512x512": "1:1",
-        "1536x1024": "3:2",
-        "1024x1536": "2:3",
-        "1344x768": "16:9",
-        "768x1344": "9:16",
-      };
-      return map[s] || "1:1";
-    };
-
     const payload = {
-      contents: [
-        {
-          parts: [{ text: prompt }],
-        },
-      ],
+      contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
-        // Some Gemini image endpoints behave better if you request Image modality explicitly.
-        // If your model complains, comment this line back out.
         responseModalities: ["IMAGE"],
-        imageConfig: {
-          aspectRatio: sizeToAspect(requestedSize),
-        },
+        imageConfig: { aspectRatio: sizeToAspect(requestedSize) },
       },
     };
 
@@ -240,7 +213,7 @@ export default async function handler(req, res) {
     if (inline?.inlineData?.data) {
       const mime = inline.inlineData.mimeType || "image/png";
       return ok({
-        provider: "gemini",
+        providerName: "gemini",
         promptUsed: prompt,
         b64_json: inline.inlineData.data,
         mimeType: mime,
@@ -255,31 +228,50 @@ export default async function handler(req, res) {
     throw new Error("Gemini returned no image payload");
   }
 
-  // ----- EXECUTION: retry + fallback chain -----
+  // ----- ROUTING -----
+  // provider can be: "xai"|"grok"|"openai"|"gemini"|"google"
+  const p = (provider || "").toLowerCase().trim();
+
   try {
-    const grokResult = await withRetry(() => tryGrok(), { tries: 2, delayMs: 700 });
-    res.status(200).json(grokResult);
-    return;
-  } catch (grokErr) {
+    // Explicit provider selection (no fallback)
+    if (p === "xai" || p === "grok") {
+      const r = await withRetry(() => tryGrok(), { tries: 2, delayMs: 700 });
+      return res.status(200).json(r);
+    }
+    if (p === "openai") {
+      const r = await withRetry(() => tryOpenAI(), { tries: 2, delayMs: 700 });
+      return res.status(200).json(r);
+    }
+    if (p === "gemini" || p === "google") {
+      const r = await withRetry(() => tryGemini(), { tries: 1, delayMs: 700 });
+      return res.status(200).json(r);
+    }
+
+    // No provider → fallback chain (your original behavior)
     try {
-      const openaiResult = await withRetry(() => tryOpenAI(), { tries: 2, delayMs: 700 });
-      res.status(200).json(openaiResult);
-      return;
-    } catch (openaiErr) {
+      const grokResult = await withRetry(() => tryGrok(), { tries: 2, delayMs: 700 });
+      return res.status(200).json(grokResult);
+    } catch (grokErr) {
       try {
-        const geminiResult = await withRetry(() => tryGemini(), { tries: 1, delayMs: 700 });
-        res.status(200).json(geminiResult);
-        return;
-      } catch (geminiErr) {
-        res.status(502).json({
-          error: "All image providers failed",
-          details: {
-            grok: errMsg(grokErr),
-            openai: errMsg(openaiErr),
-            gemini: errMsg(geminiErr),
-          },
-        });
+        const openaiResult = await withRetry(() => tryOpenAI(), { tries: 2, delayMs: 700 });
+        return res.status(200).json(openaiResult);
+      } catch (openaiErr) {
+        try {
+          const geminiResult = await withRetry(() => tryGemini(), { tries: 1, delayMs: 700 });
+          return res.status(200).json(geminiResult);
+        } catch (geminiErr) {
+          return res.status(502).json({
+            error: "All image providers failed",
+            details: {
+              grok: errMsg(grokErr),
+              openai: errMsg(openaiErr),
+              gemini: errMsg(geminiErr),
+            },
+          });
+        }
       }
     }
+  } catch (e) {
+    return res.status(500).json({ error: errMsg(e) });
   }
 }

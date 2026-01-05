@@ -3,8 +3,6 @@
     { "source": "/proxy", "destination": "/api/proxy" }
   ],
   "functions": {
-    "api/**": {
-      "runtime": "nodejs20.x"
-    }
+    "api/**/*.js": { "runtime": "@vercel/node@3.0.0" }
   }
 }

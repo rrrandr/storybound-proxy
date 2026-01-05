@@ -1,43 +1,30 @@
-import axios from "axios";
-import crypto from "crypto";
+const axios = require("axios");
+const crypto = require("crypto");
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   // ----- CORS / PREFLIGHT -----
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  if (req.method === "OPTIONS") {
-    res.status(200).end();
-    return;
-  }
-
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   // ----- KEYS -----
   const XAI_API_KEY = process.env.XAI_API_KEY || process.env.GROK_API_KEY;
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY; // Google AI Studio key
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // OpenAI key (optional third fallback)
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-  // ----- COST GUARDS (tune via env if you want) -----
+  // ----- COST GUARDS -----
   const timeoutMs = Number(process.env.PROXY_TIMEOUT_MS || 60000);
-
-  // Biggest cost lever: cap the amount of history you forward
-  const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || 24);            // keep last N messages
+  const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || 24);
   const MAX_CHARS_PER_MESSAGE = Number(process.env.MAX_CHARS_PER_MESSAGE || 3200);
   const MAX_TOTAL_INPUT_CHARS = Number(process.env.MAX_TOTAL_INPUT_CHARS || 18000);
-
-  // Second biggest cost lever: cap output tokens
   const MAX_OUTPUT_TOKENS = Number(process.env.MAX_OUTPUT_TOKENS || 900);
 
-  // Force cheap fallback models (recommended)
   const GEMINI_FALLBACK_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
   const OPENAI_FALLBACK_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-  // ----- HELPERS -----
   function errMsg(e) {
     const data = e?.response?.data;
     if (!data) return e?.message || "Unknown error";
@@ -57,31 +44,23 @@ export default async function handler(req, res) {
     res.setHeader("x-storybound-request-id", requestId);
   }
 
-  // ---- Cost guard: sanitize + clamp request body ----
   function clampText(s, max) {
     const t = typeof s === "string" ? s : "";
-    if (t.length <= max) return t;
-    // keep the tail (most relevant for stories)
-    return t.slice(t.length - max);
+    return t.length <= max ? t : t.slice(t.length - max);
   }
 
   function sanitizeChatBody(bodyRaw) {
     const body = bodyRaw && typeof bodyRaw === "object" ? bodyRaw : {};
     const messages = Array.isArray(body.messages) ? body.messages : [];
 
-    // keep last N messages
     const sliced = messages.slice(Math.max(0, messages.length - MAX_MESSAGES));
-
-    // clamp each message content
     const clamped = sliced.map((m) => ({
       role: m?.role || "user",
       content: clampText(m?.content, MAX_CHARS_PER_MESSAGE),
     }));
 
-    // cap total input chars across all messages (keep tail)
     let total = clamped.reduce((sum, m) => sum + (m.content?.length || 0), 0);
     if (total > MAX_TOTAL_INPUT_CHARS) {
-      // trim from the front (oldest first) until under cap
       const out = [...clamped];
       while (out.length > 1 && total > MAX_TOTAL_INPUT_CHARS) {
         const removed = out.shift();
@@ -90,28 +69,19 @@ export default async function handler(req, res) {
       return {
         ...body,
         messages: out,
-        // override max_tokens to guard costs (xAI/OpenAI)
-        max_tokens: Math.min(
-          Number.isFinite(body.max_tokens) ? body.max_tokens : MAX_OUTPUT_TOKENS,
-          MAX_OUTPUT_TOKENS
-        ),
+        max_tokens: Math.min(Number.isFinite(body.max_tokens) ? body.max_tokens : MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
       };
     }
 
     return {
       ...body,
       messages: clamped,
-      max_tokens: Math.min(
-        Number.isFinite(body.max_tokens) ? body.max_tokens : MAX_OUTPUT_TOKENS,
-        MAX_OUTPUT_TOKENS
-      ),
+      max_tokens: Math.min(Number.isFinite(body.max_tokens) ? body.max_tokens : MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
     };
   }
 
-  // Convert OpenAI/xAI-style {messages:[{role,content}]} into Gemini {contents, systemInstruction}
   function toGeminiRequest(body) {
     const { messages, temperature, top_p } = body || {};
-
     const sysTexts = [];
     const contents = [];
 
@@ -136,42 +106,28 @@ export default async function handler(req, res) {
 
     const reqBody = {
       contents,
-      generationConfig: {
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-      },
+      generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS },
     };
 
-    if (sysTexts.length) {
-      reqBody.systemInstruction = { parts: [{ text: sysTexts.join("\n\n") }] };
-    }
-
+    if (sysTexts.length) reqBody.systemInstruction = { parts: [{ text: sysTexts.join("\n\n") }] };
     if (typeof temperature === "number") reqBody.generationConfig.temperature = temperature;
     if (typeof top_p === "number") reqBody.generationConfig.topP = top_p;
 
     return { geminiModel: GEMINI_FALLBACK_MODEL, reqBody };
   }
 
-  // Convert Gemini response into an OpenAI/xAI-ish chat.completions shape
   function fromGeminiToChatCompletions(geminiResp, modelName) {
     const data = geminiResp?.data || {};
     const text =
       data?.candidates?.[0]?.content?.parts?.map((p) => p?.text).filter(Boolean).join("") || "";
-
     return {
       id: "gemini_fallback",
       object: "chat.completion",
       model: modelName,
-      choices: [
-        {
-          index: 0,
-          message: { role: "assistant", content: text || "" },
-          finish_reason: "stop",
-        },
-      ],
+      choices: [{ index: 0, message: { role: "assistant", content: text || "" }, finish_reason: "stop" }],
     };
   }
 
-  // Convert OpenAI response to xAI-ish (optional, but keeps shape consistent)
   function fromOpenAIToChatCompletions(openaiResp, modelName) {
     const data = openaiResp?.data || {};
     const text = data?.choices?.[0]?.message?.content || "";
@@ -179,17 +135,10 @@ export default async function handler(req, res) {
       id: data?.id || "openai_fallback",
       object: "chat.completion",
       model: modelName,
-      choices: [
-        {
-          index: 0,
-          message: { role: "assistant", content: text || "" },
-          finish_reason: data?.choices?.[0]?.finish_reason || "stop",
-        },
-      ],
+      choices: [{ index: 0, message: { role: "assistant", content: text || "" }, finish_reason: data?.choices?.[0]?.finish_reason || "stop" }],
     };
   }
 
-  // ----- MAIN: xAI -> Gemini -> OpenAI -----
   const requestId = crypto.randomUUID();
   const safeBody = sanitizeChatBody(req.body);
 
@@ -198,45 +147,20 @@ export default async function handler(req, res) {
     if (!XAI_API_KEY) throw new Error("XAI_API_KEY (or GROK_API_KEY) not set");
 
     const xaiModel = safeBody?.model || "grok-4-1-fast-reasoning";
-    console.log(
-      JSON.stringify({ requestId, provider: "xai", model: xaiModel, at: new Date().toISOString() })
-    );
     setDebugHeaders({ provider: "xai", model: xaiModel, requestId });
 
-    const xaiResp = await postWithTimeout(
-      "https://api.x.ai/v1/chat/completions",
-      safeBody,
-      {
-        Authorization: `Bearer ${XAI_API_KEY}`,
-        "Content-Type": "application/json",
-      }
-    );
+    const xaiResp = await postWithTimeout("https://api.x.ai/v1/chat/completions", safeBody, {
+      Authorization: `Bearer ${XAI_API_KEY}`,
+      "Content-Type": "application/json",
+    });
 
-    res.status(200).json(xaiResp.data);
-    return;
+    return res.status(200).json(xaiResp.data);
   } catch (xaiErr) {
-    console.warn(
-      JSON.stringify({
-        requestId,
-        provider: "xai",
-        err: errMsg(xaiErr),
-        at: new Date().toISOString(),
-      })
-    );
-
     // 2) Gemini
     try {
       if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY not set");
 
       const { geminiModel, reqBody } = toGeminiRequest(safeBody);
-      console.log(
-        JSON.stringify({
-          requestId,
-          provider: "gemini",
-          model: geminiModel,
-          at: new Date().toISOString(),
-        })
-      );
       setDebugHeaders({ provider: "gemini", model: geminiModel, requestId });
 
       const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
@@ -248,30 +172,12 @@ export default async function handler(req, res) {
         Accept: "application/json",
       });
 
-      res.status(200).json(fromGeminiToChatCompletions(geminiResp, geminiModel));
-      return;
+      return res.status(200).json(fromGeminiToChatCompletions(geminiResp, geminiModel));
     } catch (geminiErr) {
-      console.warn(
-        JSON.stringify({
-          requestId,
-          provider: "gemini",
-          err: errMsg(geminiErr),
-          at: new Date().toISOString(),
-        })
-      );
-
-      // 3) OpenAI (optional third fallback)
+      // 3) OpenAI
       try {
         if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
 
-        console.log(
-          JSON.stringify({
-            requestId,
-            provider: "openai",
-            model: OPENAI_FALLBACK_MODEL,
-            at: new Date().toISOString(),
-          })
-        );
         setDebugHeaders({ provider: "openai", model: OPENAI_FALLBACK_MODEL, requestId });
 
         const openaiResp = await postWithTimeout(
@@ -281,7 +187,7 @@ export default async function handler(req, res) {
             messages: safeBody.messages,
             temperature: safeBody.temperature,
             top_p: safeBody.top_p,
-            max_tokens: safeBody.max_tokens, // already clamped
+            max_tokens: safeBody.max_tokens,
           },
           {
             Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -289,34 +195,14 @@ export default async function handler(req, res) {
           }
         );
 
-        res.status(200).json(fromOpenAIToChatCompletions(openaiResp, OPENAI_FALLBACK_MODEL));
-        return;
+        return res.status(200).json(fromOpenAIToChatCompletions(openaiResp, OPENAI_FALLBACK_MODEL));
       } catch (openaiErr) {
-        console.warn(
-          JSON.stringify({
-            requestId,
-            provider: "openai",
-            err: errMsg(openaiErr),
-            at: new Date().toISOString(),
-          })
-        );
-
-        res.status(502).json({
+        return res.status(502).json({
           error: "All providers failed",
           requestId,
-          details: {
-            xai: errMsg(xaiErr),
-            gemini: errMsg(geminiErr),
-            openai: errMsg(openaiErr),
-          },
+          details: { xai: errMsg(xaiErr), gemini: errMsg(geminiErr), openai: errMsg(openaiErr) },
         });
       }
     }
   }
-}
-
-export const config = {
-  api: {
-    bodyParser: true,
-  },
 };

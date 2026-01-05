@@ -52,14 +52,15 @@ module.exports = async function handler(req, res) {
   function sanitizeChatBody(bodyRaw) {
     const body = bodyRaw && typeof bodyRaw === "object" ? bodyRaw : {};
     const messages = Array.isArray(body.messages) ? body.messages : [];
-
     const sliced = messages.slice(Math.max(0, messages.length - MAX_MESSAGES));
+
     const clamped = sliced.map((m) => ({
       role: m?.role || "user",
       content: clampText(m?.content, MAX_CHARS_PER_MESSAGE),
     }));
 
     let total = clamped.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+
     if (total > MAX_TOTAL_INPUT_CHARS) {
       const out = [...clamped];
       while (out.length > 1 && total > MAX_TOTAL_INPUT_CHARS) {
@@ -69,14 +70,20 @@ module.exports = async function handler(req, res) {
       return {
         ...body,
         messages: out,
-        max_tokens: Math.min(Number.isFinite(body.max_tokens) ? body.max_tokens : MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+        max_tokens: Math.min(
+          Number.isFinite(body.max_tokens) ? body.max_tokens : MAX_OUTPUT_TOKENS,
+          MAX_OUTPUT_TOKENS
+        ),
       };
     }
 
     return {
       ...body,
       messages: clamped,
-      max_tokens: Math.min(Number.isFinite(body.max_tokens) ? body.max_tokens : MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS),
+      max_tokens: Math.min(
+        Number.isFinite(body.max_tokens) ? body.max_tokens : MAX_OUTPUT_TOKENS,
+        MAX_OUTPUT_TOKENS
+      ),
     };
   }
 
@@ -120,6 +127,7 @@ module.exports = async function handler(req, res) {
     const data = geminiResp?.data || {};
     const text =
       data?.candidates?.[0]?.content?.parts?.map((p) => p?.text).filter(Boolean).join("") || "";
+
     return {
       id: "gemini_fallback",
       object: "chat.completion",
@@ -139,7 +147,7 @@ module.exports = async function handler(req, res) {
     };
   }
 
-  const requestId = crypto.randomUUID();
+  const requestId = (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex"));
   const safeBody = sanitizeChatBody(req.body);
 
   // 1) xAI

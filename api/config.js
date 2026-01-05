@@ -7,3 +7,4 @@ export default function handler(req, res) {
     has_IMAGE_PROXY_URL: !!process.env.IMAGE_PROXY_URL,
   });
 }
+ 

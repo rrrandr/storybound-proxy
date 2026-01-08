@@ -4,13 +4,18 @@ import axios from "axios";
 import crypto from "crypto";
 
 export default async function handler(req, res) {
-  // ----- CORS / PREFLIGHT -----
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+// ----- CORS / PREFLIGHT -----
+res.setHeader('Access-Control-Allow-Origin', 'https://storybound-app.vercel.app');
+res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+if (req.method === 'OPTIONS') {
+  return res.status(200).end();
+}
+
+if (req.method !== 'POST') {
+  return res.status(405).json({ error: 'Method not allowed' });
+}
 
   // ----- KEYS -----
   const XAI_API_KEY = process.env.XAI_API_KEY || process.env.GROK_API_KEY;

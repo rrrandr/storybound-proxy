@@ -4,72 +4,73 @@ import axios from "axios";
 import crypto from "crypto";
 
 export default async function handler(req, res) {
-// ----- CORS / PREFLIGHT -----
-res.setHeader('Access-Control-Allow-Origin', 'https://storybound-app.vercel.app');
-res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  try {
+    // ----- CORS / PREFLIGHT -----
+    res.setHeader('Access-Control-Allow-Origin', 'https://storybound-app.vercel.app');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-if (req.method === 'OPTIONS') {
-  return res.status(200).end();
-}
-
-if (req.method !== 'POST') {
-  return res.status(405).json({ error: 'Method not allowed' });
-}
-
-  // ----- KEYS -----
-  const XAI_API_KEY = process.env.XAI_API_KEY || process.env.GROK_API_KEY;
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
-  // ----- COST GUARDS -----
-  const timeoutMs = Number(process.env.PROXY_TIMEOUT_MS || 60000);
-
-  const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || 24);
-  const MAX_CHARS_PER_MESSAGE = Number(process.env.MAX_CHARS_PER_MESSAGE || 3200);
-  const MAX_TOTAL_INPUT_CHARS = Number(process.env.MAX_TOTAL_INPUT_CHARS || 18000);
-
-  const MAX_OUTPUT_TOKENS = Number(process.env.MAX_OUTPUT_TOKENS || 900);
-
-  const GEMINI_FALLBACK_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-  const OPENAI_FALLBACK_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-  // ----- Helpers -----
-  function errMsg(e) {
-    const data = e?.response?.data;
-    if (!data) return e?.message || "Unknown error";
-    if (typeof data === "string") return data;
-    if (data?.error) return typeof data.error === "string" ? data.error : JSON.stringify(data.error);
-    if (data?.message) return data.message;
-    return JSON.stringify(data);
-  }
-
-  async function postWithTimeout(url, payload, headers) {
-    return axios.post(url, payload, { headers, timeout: timeoutMs });
-  }
-
-  function setDebugHeaders({ provider, model, requestId }) {
-    res.setHeader("x-storybound-provider", provider);
-    res.setHeader("x-storybound-model", model);
-    res.setHeader("x-storybound-request-id", requestId);
-  }
-
-  function clampText(s, max) {
-    const t = typeof s === "string" ? s : "";
-    if (t.length <= max) return t;
-    return t.slice(t.length - max); // keep tail
-  }
-
-  function safeJsonBody(raw) {
-    // In Vercel, req.body is usually already an object; but be defensive.
-    if (!raw) return {};
-    if (typeof raw === "object") return raw;
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {};
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
     }
+
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // ----- KEYS -----
+    const XAI_API_KEY = process.env.XAI_API_KEY || process.env.GROK_API_KEY;
+    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+    if (!XAI_API_KEY && !GEMINI_API_KEY && !OPENAI_API_KEY) {
+      throw new Error('No LLM API key configured');
+    }
+
+    // ----- COST GUARDS -----
+    const timeoutMs = Number(process.env.PROXY_TIMEOUT_MS || 60000);
+    const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || 24);
+    const MAX_CHARS_PER_MESSAGE = Number(process.env.MAX_CHARS_PER_MESSAGE || 3200);
+    const MAX_TOTAL_INPUT_CHARS = Number(process.env.MAX_TOTAL_INPUT_CHARS || 18000);
+    const MAX_OUTPUT_TOKENS = Number(process.env.MAX_OUTPUT_TOKENS || 900);
+
+    const GEMINI_FALLBACK_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    const OPENAI_FALLBACK_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+    // ----- Helpers -----
+    function errMsg(e) {
+      const data = e?.response?.data;
+      if (!data) return e?.message || 'Unknown error';
+      if (typeof data === 'string') return data;
+      if (data?.error) return typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
+      if (data?.message) return data.message;
+      return JSON.stringify(data);
+    }
+
+    function safeJsonBody(raw) {
+      if (!raw) return {};
+      if (typeof raw === 'object') return raw;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return {};
+      }
+    }
+
+    // ---- TEMP: confirm proxy is alive ----
+    return res.status(200).json({ ok: true });
+
+    // (Your real proxy logic goes here next)
+
+  } catch (err) {
+    console.error('PROXY ERROR:', err);
+    return res.status(500).json({
+      error: 'Proxy failed',
+      message: err.message || String(err)
+    });
   }
+}
+
 
   function sanitizeChatBody(bodyRaw) {
     const body = bodyRaw && typeof bodyRaw === "object" ? bodyRaw : {};

@@ -8,7 +8,6 @@ export default function handler(req, res) {
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
+// NEVER CHANGE OR DELETE ANYTHING ABOVE
+  
 
-  // TEMP: prove POST can be reached
-  return res.status(200).json({ ok: true });
-}

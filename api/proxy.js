@@ -15,8 +15,13 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    return res.status(200).json({ ok: true, stage: "minimal proxy alive" });
+    const body = req.body || {};
 
+return res.status(200).json({
+  ok: true,
+  received: body
+});
+  
   } catch (err) {
     return res.status(500).json({
       error: "Proxy crashed",

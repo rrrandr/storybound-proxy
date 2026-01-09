@@ -8,13 +8,12 @@ export default async function handler(req, res) {
   }
 
   // ACCEPT POST AND RETURN ECHO
-  if (req.method === "POST") {
-    return res.status(200).json({
-      ok: true,
-      method: req.method,
-      body: req.body ?? null
-    });
-  }
-
+ if (req.method === "POST") {
+  return res.status(200).json({
+    ok: true,
+    receivedKeys: Object.keys(req.body || {}),
+    preview: JSON.stringify(req.body).slice(0, 500)
+  });
+}
   return res.status(405).json({ error: "Method not allowed" });
 }

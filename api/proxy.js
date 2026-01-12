@@ -1,17 +1,18 @@
 export default async function handler(req, res) {
   // ---------- CORS ----------
-const origin = req.headers.origin;
+  const origin = req.headers.origin;
 
-const isAllowed =
-  origin === "https://storybound-app.vercel.app" ||
-  (origin && /^https:\/\/storybound-app-.*\.vercel\.app$/.test(origin));
+  const isAllowed =
+    origin === "https://storybound-app.vercel.app" ||
+    (origin && /^https:\/\/storybound(-app)?-[a-z0-9]+-romans-projects-[a-z0-9]+\.vercel\.app$/.test(origin));
 
-res.setHeader(
-  "Access-Control-Allow-Origin",
-  isAllowed ? origin : "https://storybound-app.vercel.app"
-);
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    isAllowed ? origin : "https://storybound-app.vercel.app"
+  );
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Vary", "Origin");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();

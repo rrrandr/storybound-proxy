@@ -9,6 +9,17 @@ const replicate = new Replicate({
 });
 
 export default async function handler(req, res) {
+  // ===== CORS (MANDATORY) =====
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Preflight handling (MANDATORY)
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  // ============================
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -42,9 +53,6 @@ export default async function handler(req, res) {
 
     // PERCHANCE PROVIDER
     if (provider === 'perchance') {
-      // Perchance integration - implement based on your setup
-      // Option A: eeemoon/perchance Python microservice
-      // Option B: Direct Perchance API if available
       return res.status(501).json({ error: 'Perchance not configured' });
     }
 

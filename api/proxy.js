@@ -1,21 +1,21 @@
 export default async function handler(req, res) {
-  // ---------- CORS ----------
-  const origin = req.headers.origin;
+  // =====================================================
+  // CORS — ALLOW ALL STORYBOUND DEPLOYMENTS
+  // =====================================================
+  const origin = req.headers.origin || "";
 
-  const isAllowed =
+  const allowed =
     origin === "https://storybound-app.vercel.app" ||
-    (origin && /^https:\/\/storybound(-app)?-[a-z0-9]+-romans-projects-[a-z0-9]+\.vercel\.app$/.test(origin));
+    /^https:\/\/storybound(-app)?-[a-z0-9-]+\.vercel\.app$/.test(origin);
 
-  res.setHeader(
-    "Access-Control-Allow-Origin",
-    isAllowed ? origin : "https://storybound-app.vercel.app"
-  );
+  res.setHeader("Access-Control-Allow-Origin", allowed ? origin : "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Vary", "Origin");
 
   if (req.method === "OPTIONS") {
-    return res.status(200).end();
+    // IMPORTANT: 204 avoids Vercel CORS weirdness
+    return res.status(204).end();
   }
 
   if (req.method !== "POST") {
@@ -23,6 +23,34 @@ export default async function handler(req, res) {
   }
 
   try {
+    const url = new URL(req.url, "http://localhost");
+    const isImageRequest = url.pathname.endsWith("/image");
+
+    // =====================================================
+    // IMAGE PASSTHROUGH (Perchance / Gemini / OpenAI)
+    // =====================================================
+    if (isImageRequest) {
+      // Forward EXACTLY as-is to storybound-app image endpoint
+      const imageRes = await fetch(
+        "https://storybound-app.vercel.app/api/image",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": req.headers.authorization || ""
+          },
+          body: JSON.stringify(req.body)
+        }
+      );
+
+      const text = await imageRes.text();
+      res.status(imageRes.status).send(text);
+      return;
+    }
+
+    // =====================================================
+    // CHAT (GROK)
+    // =====================================================
     const { messages, model, temperature, max_tokens } = req.body || {};
 
     if (!Array.isArray(messages)) {
@@ -36,7 +64,6 @@ export default async function handler(req, res) {
       throw new Error("XAI_API_KEY not set");
     }
 
-    // ---------- CALL GROK ----------
     const response = await fetch("https://api.x.ai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -58,14 +85,10 @@ export default async function handler(req, res) {
 
     const data = await response.json();
 
-    // =====================================================
-    // 🔒 ONE-LINE CONTRACT ASSERTION (CRITICAL)
-    // =====================================================
     if (!data?.choices?.[0]?.message?.content) {
       throw new Error("INVALID_MODEL_RESPONSE_SHAPE");
     }
 
-    // ---------- NORMALIZE TO OPENAI ----------
     return res.status(200).json({
       id: data.id || "storybound-grok",
       object: "chat.completion",

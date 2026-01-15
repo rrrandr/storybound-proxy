@@ -9,22 +9,27 @@ const replicate = new Replicate({
 });
 
 export default async function handler(req, res) {
-  // ===== CORS (MANDATORY) =====
+  // ================= CORS (FINAL) =================
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization'
+  );
+  res.setHeader('Access-Control-Max-Age', '86400');
 
-  // Preflight handling (MANDATORY)
+  // 🔴 MUST EXIT IMMEDIATELY FOR PREFLIGHT
   if (req.method === 'OPTIONS') {
-    return res.status(204).end();
+    res.status(204).end();
+    return;
   }
-  // ============================
+  // ===============================================
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { prompt, provider, model, size = '1024x1024', n = 1 } = req.body;
+  const { prompt, provider, model, size = '1024x1024', n = 1 } = req.body || {};
 
   if (!prompt) {
     return res.status(400).json({ error: 'Prompt required' });
@@ -33,7 +38,7 @@ export default async function handler(req, res) {
   const [width, height] = size.split('x').map(Number);
 
   try {
-    // FLUX PRIMARY
+    // ================= FLUX =================
     if (provider === 'flux') {
       const output = await replicate.run(
         "lucataco/flux-uncensored:4f5b1200e42d5c980a35d92a96ec5afaf488429a88eae732d9e21559a30b0c88",
@@ -48,15 +53,17 @@ export default async function handler(req, res) {
           }
         }
       );
-      return res.json({ url: output[0] });
+      return res.status(200).json({ url: output[0] });
     }
 
-    // PERCHANCE PROVIDER
+    // ================= PERCHANCE =================
     if (provider === 'perchance') {
-      return res.status(501).json({ error: 'Perchance not configured' });
+      return res.status(501).json({
+        error: 'Perchance not configured in proxy'
+      });
     }
 
-    // GEMINI PROVIDER
+    // ================= GEMINI =================
     if (provider === 'gemini') {
       const geminiRes = await fetch(
         `https://generativelanguage.googleapis.com/v1/models/${model || 'imagen-3.0-generate-002'}:generateImages?key=${process.env.GOOGLE_API_KEY}`,
@@ -70,35 +77,53 @@ export default async function handler(req, res) {
           })
         }
       );
+
       const data = await geminiRes.json();
-      if (!geminiRes.ok) throw new Error(data.error?.message || 'Gemini failed');
-      return res.json({ url: data.generated_images?.[0]?.image_uri });
-    }
+      if (!geminiRes.ok) {
+        throw new Error(data.error?.message || 'Gemini failed');
+      }
 
-    // OPENAI LAST RESORT
-    if (provider === 'openai') {
-      const openaiRes = await fetch('https://api.openai.com/v1/images/generations', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: model || 'gpt-image-1',
-          prompt,
-          size,
-          n
-        })
+      return res.status(200).json({
+        url: data.generated_images?.[0]?.image_uri
       });
-      const data = await openaiRes.json();
-      if (!openaiRes.ok) throw new Error(data.error?.message || 'OpenAI failed');
-      return res.json({ url: data.data?.[0]?.url, data: data.data });
     }
 
-    return res.status(400).json({ error: `Unknown provider: ${provider}` });
+    // ================= OPENAI =================
+    if (provider === 'openai') {
+      const openaiRes = await fetch(
+        'https://api.openai.com/v1/images/generations',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: model || 'gpt-image-1',
+            prompt,
+            size,
+            n
+          })
+        }
+      );
+
+      const data = await openaiRes.json();
+      if (!openaiRes.ok) {
+        throw new Error(data.error?.message || 'OpenAI failed');
+      }
+
+      return res.status(200).json({
+        url: data.data?.[0]?.url,
+        data: data.data
+      });
+    }
+
+    return res.status(400).json({
+      error: `Unknown provider: ${provider}`
+    });
 
   } catch (err) {
-    console.error(`[${provider}] Error:`, err.message);
+    console.error(`[image proxy] ${provider} error:`, err);
     return res.status(502).json({ error: err.message });
   }
 }

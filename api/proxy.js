@@ -30,7 +30,6 @@ export default async function handler(req, res) {
     // IMAGE PASSTHROUGH (Perchance / Gemini / OpenAI)
     // =====================================================
     if (isImageRequest) {
-      // Forward EXACTLY as-is to storybound-app image endpoint
       const imageRes = await fetch(
         "https://storybound-app.vercel.app/api/image",
         {
@@ -44,66 +43,180 @@ export default async function handler(req, res) {
       );
 
       const text = await imageRes.text();
-      res.status(imageRes.status).send(text);
-      return;
+      return res.status(imageRes.status).send(text);
     }
 
     // =====================================================
-    // CHAT (GROK)
+    // CHAT — ROLE-BASED MODEL ROUTING (AUTHOR vs GROK)
     // =====================================================
-    const { messages, model, temperature, max_tokens } = req.body || {};
+    const { messages, role, temperature, max_tokens } = req.body || {};
 
     if (!Array.isArray(messages)) {
-      throw new Error("Invalid messages payload");
+      return res.status(400).json({
+        error: "INVALID_PAYLOAD",
+        detail: "messages must be an array"
+      });
     }
 
-    const XAI_API_KEY =
-      process.env.XAI_API_KEY || process.env.GROK_API_KEY;
+    // -----------------------------------------------------
+    // ROLE DEFINITIONS
+    // -----------------------------------------------------
+    const AUTHOR_ROLES = [
+      "AUTHOR",
+      "PRIMARY_AUTHOR",
+      "FATE_STRUCTURAL",
+      "FATE_ELEVATION"
+    ];
 
-    if (!XAI_API_KEY) {
-      throw new Error("XAI_API_KEY not set");
-    }
+    const GROK_ROLES = [
+      "RENDERER",
+      "SEX_RENDERER",
+      "SPECIALIST_RENDERER"
+    ];
 
-    const response = await fetch("https://api.x.ai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${XAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: model || "grok-4-1-fast-reasoning",
-        messages,
-        temperature: temperature ?? 0.7,
-        max_tokens: max_tokens ?? 1000
-      })
-    });
+    // =====================================================
+    // AUTHOR ROLES → OpenAI (gpt-4o-mini)
+    // HARD FAIL — NO GROK FALLBACK
+    // =====================================================
+    if (AUTHOR_ROLES.includes(role)) {
+      const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Grok HTTP ${response.status}: ${text}`);
-    }
+      if (!OPENAI_API_KEY) {
+        return res.status(500).json({
+          error: "AUTHOR_CONFIG_ERROR",
+          detail: "OPENAI_API_KEY not set"
+        });
+      }
 
-    const data = await response.json();
-
-    if (!data?.choices?.[0]?.message?.content) {
-      throw new Error("INVALID_MODEL_RESPONSE_SHAPE");
-    }
-
-    return res.status(200).json({
-      id: data.id || "storybound-grok",
-      object: "chat.completion",
-      created: data.created || Math.floor(Date.now() / 1000),
-      model: data.model || "grok",
-      choices: [
+      const response = await fetch(
+        "https://api.openai.com/v1/chat/completions",
         {
-          index: 0,
-          message: {
-            role: "assistant",
-            content: data.choices[0].message.content
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${OPENAI_API_KEY}`,
+            "Content-Type": "application/json"
           },
-          finish_reason: data.choices[0].finish_reason || "stop"
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            messages,
+            temperature: temperature ?? 0.7,
+            max_tokens: max_tokens ?? 1000
+          })
         }
-      ]
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+        return res.status(502).json({
+          error: "AUTHOR_MODEL_FAILED",
+          detail: `OpenAI HTTP ${response.status}: ${text}`
+        });
+      }
+
+      const data = await response.json();
+
+      if (!data?.choices?.[0]?.message?.content) {
+        return res.status(502).json({
+          error: "AUTHOR_MODEL_FAILED",
+          detail: "INVALID_RESPONSE_SHAPE"
+        });
+      }
+
+      return res.status(200).json({
+        id: data.id || "storybound-author",
+        object: "chat.completion",
+        created: data.created || Math.floor(Date.now() / 1000),
+        model: "gpt-4o-mini",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: data.choices[0].message.content
+            },
+            finish_reason: data.choices[0].finish_reason || "stop"
+          }
+        ]
+      });
+    }
+
+    // =====================================================
+    // RENDERER / SEX_RENDERER → Grok (xAI)
+    // =====================================================
+    if (GROK_ROLES.includes(role)) {
+      const XAI_API_KEY =
+        process.env.XAI_API_KEY || process.env.GROK_API_KEY;
+
+      if (!XAI_API_KEY) {
+        return res.status(500).json({
+          error: "RENDERER_CONFIG_ERROR",
+          detail: "XAI_API_KEY not set"
+        });
+      }
+
+      const selectedModel =
+        role === "RENDERER"
+          ? "grok-4-fast-non-reasoning"
+          : "grok-4-fast-reasoning";
+
+      const response = await fetch(
+        "https://api.x.ai/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${XAI_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: selectedModel,
+            messages,
+            temperature: temperature ?? 0.7,
+            max_tokens: max_tokens ?? 1000
+          })
+        }
+      );
+
+      if (!response.ok) {
+        const text = await response.text();
+        return res.status(502).json({
+          error: "GROK_MODEL_FAILED",
+          detail: `Grok HTTP ${response.status}: ${text}`
+        });
+      }
+
+      const data = await response.json();
+
+      if (!data?.choices?.[0]?.message?.content) {
+        return res.status(502).json({
+          error: "GROK_MODEL_FAILED",
+          detail: "INVALID_RESPONSE_SHAPE"
+        });
+      }
+
+      return res.status(200).json({
+        id: data.id || "storybound-grok",
+        object: "chat.completion",
+        created: data.created || Math.floor(Date.now() / 1000),
+        model: selectedModel,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: data.choices[0].message.content
+            },
+            finish_reason: data.choices[0].finish_reason || "stop"
+          }
+        ]
+      });
+    }
+
+    // =====================================================
+    // UNKNOWN ROLE → HARD FAIL
+    // =====================================================
+    return res.status(400).json({
+      error: "INVALID_ROLE",
+      detail: `Unknown role: "${role}"`
     });
 
   } catch (err) {
